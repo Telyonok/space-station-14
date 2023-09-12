@@ -8,7 +8,7 @@ using Robust.Shared.Serialization.TypeSerializers.Implementations.Custom.Prototy
 namespace Content.Shared.Weapons.Ranged.Components;
 
 [RegisterComponent, NetworkedComponent]
-public sealed class BallisticAmmoProviderComponent : Component
+public sealed partial class BallisticAmmoProviderComponent : Component
 {
     [ViewVariables(VVAccess.ReadWrite), DataField("soundRack")]
     public SoundSpecifier? SoundRack = new SoundPathSpecifier("/Audio/Weapons/Guns/Cock/smg_cock.ogg");
@@ -21,6 +21,8 @@ public sealed class BallisticAmmoProviderComponent : Component
 
     [ViewVariables(VVAccess.ReadWrite), DataField("capacity")]
     public int Capacity = 30;
+
+    public int Count => UnspawnedCount + Container.ContainedEntities.Count;
 
     [ViewVariables(VVAccess.ReadWrite), DataField("unspawnedCount")]
     public int UnspawnedCount;
@@ -35,20 +37,23 @@ public sealed class BallisticAmmoProviderComponent : Component
     public List<EntityUid> Entities = new();
 
     /// <summary>
-    /// Will the ammoprovider automatically cycle through rounds or does it need doing manually.
+    /// Is the magazine allowed to be manually cycled to eject a cartridge.
     /// </summary>
-    [ViewVariables(VVAccess.ReadWrite), DataField("autoCycle")]
-    public bool AutoCycle = true;
-
-    /// <summary>
-    /// Is the gun ready to shoot; if AutoCycle is true then this will always stay true and not need to be manually done.
-    /// </summary>
-    [ViewVariables(VVAccess.ReadWrite), DataField("cycled")]
-    public bool Cycled = true;
+    /// <remarks>
+    /// Set to false for entities like turrets to avoid users being able to cycle them.
+    /// </remarks>
+    [ViewVariables(VVAccess.ReadWrite), DataField("cycleable")]
+    public bool Cycleable = true;
 
     /// <summary>
     /// Is it okay for this entity to directly transfer its valid ammunition into another provider?
     /// </summary>
     [ViewVariables(VVAccess.ReadWrite), DataField("mayTransfer")]
     public bool MayTransfer = false;
+
+    /// <summary>
+    /// DoAfter delay for filling a bullet into another ballistic ammo provider.
+    /// </summary>
+    [DataField("fillDelay")]
+    public TimeSpan FillDelay = TimeSpan.FromSeconds(0.5);
 }

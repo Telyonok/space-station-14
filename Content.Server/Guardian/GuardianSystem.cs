@@ -1,10 +1,12 @@
-using Content.Server.DoAfter;
+using Content.Server.Body.Systems;
 using Content.Server.Popups;
 using Content.Shared.Actions;
 using Content.Shared.Audio;
 using Content.Shared.Damage;
 using Content.Shared.DoAfter;
 using Content.Shared.Examine;
+using Content.Shared.Guardian;
+using Content.Shared.Hands.Components;
 using Content.Shared.Hands.EntitySystems;
 using Content.Shared.Interaction;
 using Content.Shared.Interaction.Events;
@@ -22,12 +24,13 @@ namespace Content.Server.Guardian
     /// </summary>
     public sealed class GuardianSystem : EntitySystem
     {
-        [Dependency] private readonly DoAfterSystem _doAfterSystem = default!;
+        [Dependency] private readonly SharedDoAfterSystem _doAfterSystem = default!;
         [Dependency] private readonly PopupSystem _popupSystem = default!;
         [Dependency] private readonly DamageableSystem _damageSystem = default!;
         [Dependency] private readonly SharedActionsSystem _actionSystem = default!;
         [Dependency] private readonly SharedHandsSystem _handsSystem = default!;
         [Dependency] private readonly SharedAudioSystem _audio = default!;
+        [Dependency] private readonly BodySystem _bodySystem = default!;
 
         public override void Initialize()
         {
@@ -35,7 +38,7 @@ namespace Content.Server.Guardian
             SubscribeLocalEvent<GuardianCreatorComponent, UseInHandEvent>(OnCreatorUse);
             SubscribeLocalEvent<GuardianCreatorComponent, AfterInteractEvent>(OnCreatorInteract);
             SubscribeLocalEvent<GuardianCreatorComponent, ExaminedEvent>(OnCreatorExamine);
-            SubscribeLocalEvent<GuardianCreatorComponent, DoAfterEvent>(OnDoAfter);
+            SubscribeLocalEvent<GuardianCreatorComponent, GuardianCreatorDoAfterEvent>(OnDoAfter);
 
             SubscribeLocalEvent<GuardianComponent, MoveEvent>(OnGuardianMove);
             SubscribeLocalEvent<GuardianComponent, DamageChangedEvent>(OnGuardianDamaged);
@@ -86,7 +89,7 @@ namespace Content.Server.Guardian
         private void OnHostInit(EntityUid uid, GuardianHostComponent component, ComponentInit args)
         {
             component.GuardianContainer = uid.EnsureContainer<ContainerSlot>("GuardianContainer");
-            _actionSystem.AddAction(uid, component.Action, null);
+            _actionSystem.AddAction(uid, ref component.ActionEntity, component.Action);
         }
 
         private void OnHostShutdown(EntityUid uid, GuardianHostComponent component, ComponentShutdown args)
@@ -94,8 +97,11 @@ namespace Content.Server.Guardian
             if (component.HostedGuardian == null)
                 return;
 
+            if (HasComp<HandsComponent>(component.HostedGuardian.Value))
+                _bodySystem.GibBody(component.HostedGuardian.Value);
+
             EntityManager.QueueDeleteEntity(component.HostedGuardian.Value);
-            _actionSystem.RemoveAction(uid, component.Action);
+            _actionSystem.RemoveAction(uid, component.ActionEntity);
         }
 
         private void OnGuardianAttackAttempt(EntityUid uid, GuardianComponent component, AttackAttemptEvent args)
@@ -161,12 +167,7 @@ namespace Content.Server.Guardian
                 return;
             }
 
-            if (component.Injecting)
-                return;
-
-            component.Injecting = true;
-
-            _doAfterSystem.DoAfter(new DoAfterEventArgs(user, component.InjectionDelay, target: target, used: injector)
+            _doAfterSystem.TryStartDoAfter(new DoAfterArgs(EntityManager, user, component.InjectionDelay, new GuardianCreatorDoAfterEvent(), injector, target: target, used: injector)
             {
                 BreakOnTargetMove = true,
                 BreakOnUserMove = true
@@ -179,10 +180,7 @@ namespace Content.Server.Guardian
                 return;
 
             if (args.Cancelled || component.Deleted || component.Used || !_handsSystem.IsHolding(args.Args.User, uid, out _) || HasComp<GuardianHostComponent>(args.Args.Target))
-            {
-                component.Injecting = false;
                 return;
-            }
 
             var hostXform = Transform(args.Args.Target.Value);
             var host = EnsureComp<GuardianHostComponent>(args.Args.Target.Value);

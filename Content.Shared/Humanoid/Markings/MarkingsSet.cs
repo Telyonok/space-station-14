@@ -27,7 +27,7 @@ namespace Content.Shared.Humanoid.Markings;
 /// </remarks>
 [DataDefinition]
 [Serializable, NetSerializable]
-public sealed class MarkingSet
+public sealed partial class MarkingSet
 {
     /// <summary>
     ///     Every single marking in this set.
@@ -190,9 +190,9 @@ public sealed class MarkingSet
                 foreach (var marking in list)
                 {
                     if (markingManager.TryGetMarking(marking, out var prototype) &&
-                        markingManager.MustMatchSkin(species, prototype.BodyPart, prototypeManager))
+                        markingManager.MustMatchSkin(species, prototype.BodyPart, out var alpha, prototypeManager))
                     {
-                        marking.SetColor(skinColor.Value);
+                        marking.SetColor(skinColor.Value.WithAlpha(alpha));
                     }
                 }
             }

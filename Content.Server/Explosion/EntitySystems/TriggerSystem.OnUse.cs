@@ -31,13 +31,12 @@ public sealed partial class TriggerSystem
             component.Delay,
             component.BeepInterval,
             component.InitialBeepDelay,
-            component.BeepSound,
-            component.BeepParams);
+            component.BeepSound);
     }
 
     private void OnExamined(EntityUid uid, OnUseTimerTriggerComponent component, ExaminedEvent args)
     {
-        if (args.IsInDetailsRange)
+        if (args.IsInDetailsRange && component.Examinable)
             args.PushText(Loc.GetString("examine-trigger-timer", ("time", component.Delay)));
     }
 
@@ -141,7 +140,7 @@ public sealed partial class TriggerSystem
 
     private void OnTimerUse(EntityUid uid, OnUseTimerTriggerComponent component, UseInHandEvent args)
     {
-        if (args.Handled)
+        if (args.Handled || HasComp<AutomatedTimerComponent>(uid))
             return;
 
         HandleTimerTrigger(
@@ -150,8 +149,7 @@ public sealed partial class TriggerSystem
             component.Delay,
             component.BeepInterval,
             component.InitialBeepDelay,
-            component.BeepSound,
-            component.BeepParams);
+            component.BeepSound);
 
         args.Handled = true;
     }

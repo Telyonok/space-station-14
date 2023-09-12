@@ -4,6 +4,7 @@ using Content.Server.Chemistry.Components.SolutionManager;
 using Content.Server.Chemistry.EntitySystems;
 using Content.Server.Tools.Components;
 using Content.Shared.Database;
+using Content.Shared.DoAfter;
 using Content.Shared.Examine;
 using Content.Shared.FixedPoint;
 using Content.Shared.Interaction;
@@ -15,17 +16,12 @@ using Content.Shared.Weapons.Melee.Events;
 using Robust.Server.GameObjects;
 using Robust.Shared.Audio;
 using Robust.Shared.GameStates;
-using Robust.Shared.Player;
+using Robust.Shared.Utility;
 
 namespace Content.Server.Tools
 {
     public sealed partial class ToolSystem
     {
-        [Dependency] private readonly IEntityManager _entityManager = default!;
-
-        [Dependency] private readonly AppearanceSystem _appearanceSystem = default!;
-        [Dependency] private readonly SharedAudioSystem _audioSystem = default!;
-
         private readonly HashSet<EntityUid> _activeWelders = new();
 
         private const float WelderUpdateTimer = 1f;
@@ -39,17 +35,16 @@ namespace Content.Server.Tools
             SubscribeLocalEvent<WelderComponent, SolutionChangedEvent>(OnWelderSolutionChange);
             SubscribeLocalEvent<WelderComponent, ActivateInWorldEvent>(OnWelderActivate);
             SubscribeLocalEvent<WelderComponent, AfterInteractEvent>(OnWelderAfterInteract);
-            SubscribeLocalEvent<WelderComponent, ToolUseAttemptEvent>(OnWelderToolUseAttempt);
-            SubscribeLocalEvent<WelderComponent, ToolUseFinishAttemptEvent>(OnWelderToolUseFinishAttempt);
+            SubscribeLocalEvent<WelderComponent, DoAfterAttemptEvent<ToolDoAfterEvent>>(OnWelderToolUseAttempt);
             SubscribeLocalEvent<WelderComponent, ComponentShutdown>(OnWelderShutdown);
             SubscribeLocalEvent<WelderComponent, ComponentGetState>(OnWelderGetState);
-            SubscribeLocalEvent<WelderComponent, MeleeHitEvent>(OnMeleeHit);
+            SubscribeLocalEvent<WelderComponent, GetMeleeDamageEvent>(OnGetMeleeDamage);
         }
 
-        private void OnMeleeHit(EntityUid uid, WelderComponent component, MeleeHitEvent args)
+        private void OnGetMeleeDamage(EntityUid uid, WelderComponent component, ref GetMeleeDamageEvent args)
         {
-            if (!args.Handled && component.Lit)
-                args.BonusDamage += component.LitMeleeDamageBonus;
+            if (component.Lit)
+                args.Damage += component.LitMeleeDamageBonus;
         }
 
         public (FixedPoint2 fuel, FixedPoint2 capacity) GetWelderFuelAndCapacity(EntityUid uid, WelderComponent? welder = null, SolutionContainerManagerComponent? solutionContainer = null)
@@ -58,14 +53,14 @@ namespace Content.Server.Tools
                 || !_solutionContainerSystem.TryGetSolution(uid, welder.FuelSolution, out var fuelSolution, solutionContainer))
                 return (FixedPoint2.Zero, FixedPoint2.Zero);
 
-            return (_solutionContainerSystem.GetReagentQuantity(uid, welder.FuelReagent), fuelSolution.MaxVolume);
+            return (_solutionContainerSystem.GetTotalPrototypeQuantity(uid, welder.FuelReagent), fuelSolution.MaxVolume);
         }
 
         public bool TryToggleWelder(EntityUid uid, EntityUid? user,
             WelderComponent? welder = null,
             SolutionContainerManagerComponent? solutionContainer = null,
             ItemComponent? item = null,
-            PointLightComponent? light = null,
+            SharedPointLightComponent? light = null,
             AppearanceComponent? appearance = null)
         {
             // Right now, we only need the welder.
@@ -82,7 +77,7 @@ namespace Content.Server.Tools
             WelderComponent? welder = null,
             SolutionContainerManagerComponent? solutionContainer = null,
             ItemComponent? item = null,
-            PointLightComponent? light = null,
+            SharedPointLightComponent? light = null,
             AppearanceComponent? appearance = null,
             TransformComponent? transform = null)
         {
@@ -90,12 +85,14 @@ namespace Content.Server.Tools
                 return false;
 
             // Optional components.
-            Resolve(uid, ref item, ref light, ref appearance, false);
+            Resolve(uid, ref item,ref appearance, false);
+
+            _light.ResolveLight(uid, ref light);
 
             if (!_solutionContainerSystem.TryGetSolution(uid, welder.FuelSolution, out var solution, solutionContainer))
                 return false;
 
-            var fuel = solution.GetReagentQuantity(welder.FuelReagent);
+            var fuel = solution.GetTotalPrototypeQuantity(welder.FuelReagent);
 
             // Not enough fuel to lit welder.
             if (fuel == FixedPoint2.Zero || fuel < welder.FuelLitCost)
@@ -125,7 +122,9 @@ namespace Content.Server.Tools
             _appearanceSystem.SetData(uid, ToggleableLightVisuals.Enabled, true);
 
             if (light != null)
-                light.Enabled = true;
+            {
+                _light.SetEnabled(uid, true, light);
+            }
 
             _audioSystem.PlayPvs(welder.WelderOnSounds, uid, AudioParams.Default.WithVariation(0.125f).WithVolume(-5f));
 
@@ -135,7 +134,7 @@ namespace Content.Server.Tools
                 _atmosphereSystem.HotspotExpose(gridUid, position, 700, 50, uid, true);
             }
 
-            _entityManager.Dirty(welder);
+            Dirty(uid, welder);
 
             _activeWelders.Add(uid);
             return true;
@@ -144,7 +143,7 @@ namespace Content.Server.Tools
         public bool TryTurnWelderOff(EntityUid uid, EntityUid? user,
             WelderComponent? welder = null,
             ItemComponent? item = null,
-            PointLightComponent? light = null,
+            SharedPointLightComponent? light = null,
             AppearanceComponent? appearance = null)
         {
             if (!Resolve(uid, ref welder))
@@ -162,7 +161,7 @@ namespace Content.Server.Tools
                 _adminLogger.Add(LogType.Action, LogImpact.Low, $"{ToPrettyString(uid):welder} toggled off");
 
             var ev = new WelderToggledEvent(false);
-            RaiseLocalEvent(welder.Owner, ev, false);
+            RaiseLocalEvent(uid, ev, false);
 
             var hotEvent = new IsHotEvent() {IsHot = false};
             RaiseLocalEvent(uid, hotEvent);
@@ -172,11 +171,13 @@ namespace Content.Server.Tools
             _appearanceSystem.SetData(uid, ToggleableLightVisuals.Enabled, false);
 
             if (light != null)
-                light.Enabled = false;
+            {
+                _light.SetEnabled(uid, false, light);
+            }
 
             _audioSystem.PlayPvs(welder.WelderOffSounds, uid, AudioParams.Default.WithVariation(0.125f).WithVolume(-5f));
 
-            _entityManager.Dirty(welder);
+            Dirty(uid, welder);
 
             _activeWelders.Remove(uid);
             return true;
@@ -184,7 +185,8 @@ namespace Content.Server.Tools
 
         private void OnWelderStartup(EntityUid uid, WelderComponent welder, ComponentStartup args)
         {
-            _entityManager.Dirty(welder);
+            // TODO: Delete this shit what
+            Dirty(welder);
         }
 
         private void OnWelderIsHotEvent(EntityUid uid, WelderComponent welder, IsHotEvent args)
@@ -217,7 +219,9 @@ namespace Content.Server.Tools
 
         private void OnWelderSolutionChange(EntityUid uid, WelderComponent welder, SolutionChangedEvent args)
         {
-            _entityManager.Dirty(welder);
+            // TODO what
+            // ????
+            Dirty(welder);
         }
 
         private void OnWelderActivate(EntityUid uid, WelderComponent welder, ActivateInWorldEvent args)
@@ -263,56 +267,16 @@ namespace Content.Server.Tools
             args.Handled = true;
         }
 
-        private void OnWelderToolUseAttempt(EntityUid uid, WelderComponent welder, ToolUseAttemptEvent args)
+        private void OnWelderToolUseAttempt(EntityUid uid, WelderComponent welder, DoAfterAttemptEvent<ToolDoAfterEvent> args)
         {
-            if (args.Cancelled)
-                return;
+            var user = args.DoAfter.Args.User;
 
             if (!welder.Lit)
             {
-                _popupSystem.PopupEntity(Loc.GetString("welder-component-welder-not-lit-message"), uid, args.User);
+                _popupSystem.PopupEntity(Loc.GetString("welder-component-welder-not-lit-message"), uid, user);
                 args.Cancel();
                 return;
             }
-
-            var (fuel, _) = GetWelderFuelAndCapacity(uid, welder);
-
-            if (FixedPoint2.New(args.Fuel) > fuel)
-            {
-                _popupSystem.PopupEntity(Loc.GetString("welder-component-cannot-weld-message"), uid, args.User);
-                args.Cancel();
-            }
-        }
-
-        private void OnWelderToolUseFinishAttempt(EntityUid uid, WelderComponent welder, ToolUseFinishAttemptEvent args)
-        {
-            if (args.Cancelled)
-                return;
-
-            if (!welder.Lit)
-            {
-                _popupSystem.PopupEntity(Loc.GetString("welder-component-welder-not-lit-message"), uid, args.User);
-                args.Cancel();
-                return;
-            }
-
-            var (fuel, _) = GetWelderFuelAndCapacity(uid, welder);
-
-            var neededFuel = FixedPoint2.New(args.Fuel);
-
-            if (neededFuel > fuel)
-            {
-                args.Cancel();
-            }
-
-            if (!_solutionContainerSystem.TryGetSolution(uid, welder.FuelSolution, out var solution))
-            {
-                args.Cancel();
-                return;
-            }
-
-            solution.RemoveReagent(welder.FuelReagent, neededFuel);
-            _entityManager.Dirty(welder);
         }
 
         private void OnWelderShutdown(EntityUid uid, WelderComponent welder, ComponentShutdown args)
@@ -347,10 +311,10 @@ namespace Content.Server.Tools
 
                 solution.RemoveReagent(welder.FuelReagent, welder.FuelConsumption * _welderTimer);
 
-                if (solution.GetReagentQuantity(welder.FuelReagent) <= FixedPoint2.Zero)
+                if (solution.GetTotalPrototypeQuantity(welder.FuelReagent) <= FixedPoint2.Zero)
                     TryTurnWelderOff(tool, null, welder);
 
-                _entityManager.Dirty(welder);
+                Dirty(welder);
             }
 
             _welderTimer -= WelderUpdateTimer;

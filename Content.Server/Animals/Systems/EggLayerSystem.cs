@@ -1,13 +1,12 @@
 using Content.Server.Actions;
 using Content.Server.Animals.Components;
-using Content.Server.Nutrition.Components;
 using Content.Server.Popups;
-using Content.Shared.Actions.ActionTypes;
+using Content.Shared.Actions.Events;
+using Content.Shared.Nutrition.Components;
+using Content.Shared.Nutrition.EntitySystems;
 using Content.Shared.Storage;
 using Robust.Server.GameObjects;
-using Robust.Shared.Audio;
 using Robust.Shared.Player;
-using Robust.Shared.Prototypes;
 using Robust.Shared.Random;
 
 namespace Content.Server.Animals.Systems;
@@ -15,8 +14,9 @@ namespace Content.Server.Animals.Systems;
 public sealed class EggLayerSystem : EntitySystem
 {
     [Dependency] private readonly IRobustRandom _random = default!;
-    [Dependency] private readonly IPrototypeManager _prototype = default!;
     [Dependency] private readonly ActionsSystem _actions = default!;
+    [Dependency] private readonly AudioSystem _audio = default!;
+    [Dependency] private readonly HungerSystem _hunger = default!;
     [Dependency] private readonly PopupSystem _popup = default!;
 
     public override void Initialize()
@@ -31,11 +31,12 @@ public sealed class EggLayerSystem : EntitySystem
     {
         base.Update(frameTime);
 
-        foreach (var eggLayer in EntityQuery<EggLayerComponent>())
+        var query = EntityQueryEnumerator<EggLayerComponent>();
+        while (query.MoveNext(out var uid, out var eggLayer))
         {
             // Players should be using the action.
-            if (HasComp<ActorComponent>(eggLayer.Owner))
-                return;
+            if (HasComp<ActorComponent>(uid))
+                continue;
 
             eggLayer.AccumulatedFrametime += frameTime;
 
@@ -45,16 +46,16 @@ public sealed class EggLayerSystem : EntitySystem
             eggLayer.AccumulatedFrametime -= eggLayer.CurrentEggLayCooldown;
             eggLayer.CurrentEggLayCooldown = _random.NextFloat(eggLayer.EggLayCooldownMin, eggLayer.EggLayCooldownMax);
 
-            TryLayEgg(eggLayer.Owner, eggLayer);
+            TryLayEgg(uid, eggLayer);
         }
     }
 
     private void OnComponentInit(EntityUid uid, EggLayerComponent component, ComponentInit args)
     {
-        if (!_prototype.TryIndex<InstantActionPrototype>(component.EggLayAction, out var action))
+        if (string.IsNullOrWhiteSpace(component.EggLayAction))
             return;
 
-        _actions.AddAction(uid, new InstantAction(action), uid);
+        _actions.AddAction(uid, Spawn(component.EggLayAction), uid);
         component.CurrentEggLayCooldown = _random.NextFloat(component.EggLayCooldownMin, component.EggLayCooldownMax);
     }
 
@@ -77,7 +78,7 @@ public sealed class EggLayerSystem : EntitySystem
                 return false;
             }
 
-            hunger.CurrentHunger -= component.HungerUsage;
+            _hunger.ModifyHunger(uid, -component.HungerUsage, hunger);
         }
 
         foreach (var ent in EntitySpawnCollection.GetSpawns(component.EggSpawn, _random))
@@ -86,7 +87,7 @@ public sealed class EggLayerSystem : EntitySystem
         }
 
         // Sound + popups
-        SoundSystem.Play(component.EggLaySound.GetSound(), Filter.Pvs(uid), uid, component.EggLaySound.Params);
+        _audio.PlayPvs(component.EggLaySound, uid);
         _popup.PopupEntity(Loc.GetString("action-popup-lay-egg-user"), uid, uid);
         _popup.PopupEntity(Loc.GetString("action-popup-lay-egg-others", ("entity", uid)), uid, Filter.PvsExcept(uid), true);
 

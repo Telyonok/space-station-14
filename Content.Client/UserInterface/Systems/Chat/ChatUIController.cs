@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Linq;
+using System.Numerics;
 using Content.Client.Administration.Managers;
 using Content.Client.Chat;
 using Content.Client.Chat.Managers;
@@ -11,6 +12,7 @@ using Content.Client.Ghost;
 using Content.Client.Lobby.UI;
 using Content.Client.UserInterface.Screens;
 using Content.Client.UserInterface.Systems.Chat.Widgets;
+using Content.Client.UserInterface.Systems.Gameplay;
 using Content.Shared.Administration;
 using Content.Shared.CCVar;
 using Content.Shared.Chat;
@@ -28,6 +30,7 @@ using Robust.Shared.Configuration;
 using Robust.Shared.Input.Binding;
 using Robust.Shared.Map;
 using Robust.Shared.Network;
+using Robust.Shared.Replays;
 using Robust.Shared.Timing;
 using Robust.Shared.Utility;
 
@@ -38,13 +41,14 @@ public sealed class ChatUIController : UIController
     [Dependency] private readonly IClientAdminManager _admin = default!;
     [Dependency] private readonly IChatManager _manager = default!;
     [Dependency] private readonly IConfigurationManager _config = default!;
-    [Dependency] private readonly IEntityManager _entities = default!;
     [Dependency] private readonly IEyeManager _eye = default!;
     [Dependency] private readonly IInputManager _input = default!;
     [Dependency] private readonly IClientNetManager _net = default!;
     [Dependency] private readonly IPlayerManager _player = default!;
     [Dependency] private readonly IStateManager _state = default!;
     [Dependency] private readonly IGameTiming _timing = default!;
+    [Dependency] private readonly IReplayRecordingManager _replayRecording = default!;
+    [Dependency] private readonly IConfigurationManager _cfg = default!;
 
     [UISystemDependency] private readonly ExamineSystem? _examine = default;
     [UISystemDependency] private readonly GhostSystem? _ghost = default;
@@ -61,13 +65,24 @@ public sealed class ChatUIController : UIController
         {SharedChatSystem.LOOCPrefix, ChatSelectChannel.LOOC},
         {SharedChatSystem.OOCPrefix, ChatSelectChannel.OOC},
         {SharedChatSystem.EmotesPrefix, ChatSelectChannel.Emotes},
+        {SharedChatSystem.EmotesAltPrefix, ChatSelectChannel.Emotes},
         {SharedChatSystem.AdminPrefix, ChatSelectChannel.Admin},
         {SharedChatSystem.RadioCommonPrefix, ChatSelectChannel.Radio},
         {SharedChatSystem.DeadPrefix, ChatSelectChannel.Dead}
     };
 
-    public static readonly Dictionary<ChatSelectChannel, char> ChannelPrefixes =
-        PrefixToChannel.ToDictionary(kv => kv.Value, kv => kv.Key);
+    public static readonly Dictionary<ChatSelectChannel, char> ChannelPrefixes = new()
+    {
+        {ChatSelectChannel.Local, SharedChatSystem.LocalPrefix},
+        {ChatSelectChannel.Whisper, SharedChatSystem.WhisperPrefix},
+        {ChatSelectChannel.Console, SharedChatSystem.ConsolePrefix},
+        {ChatSelectChannel.LOOC, SharedChatSystem.LOOCPrefix},
+        {ChatSelectChannel.OOC, SharedChatSystem.OOCPrefix},
+        {ChatSelectChannel.Emotes, SharedChatSystem.EmotesPrefix},
+        {ChatSelectChannel.Admin, SharedChatSystem.AdminPrefix},
+        {ChatSelectChannel.Radio, SharedChatSystem.RadioCommonPrefix},
+        {ChatSelectChannel.Dead, SharedChatSystem.DeadPrefix}
+    };
 
     /// <summary>
     ///     The max amount of chars allowed to fit in a single speech bubble.
@@ -160,8 +175,14 @@ public sealed class ChatUIController : UIController
         _input.SetInputCommand(ContentKeyFunctions.FocusLocalChat,
             InputCmdHandler.FromDelegate(_ => FocusChannel(ChatSelectChannel.Local)));
 
+        _input.SetInputCommand(ContentKeyFunctions.FocusEmote,
+            InputCmdHandler.FromDelegate(_ => FocusChannel(ChatSelectChannel.Emotes)));
+
         _input.SetInputCommand(ContentKeyFunctions.FocusWhisperChat,
             InputCmdHandler.FromDelegate(_ => FocusChannel(ChatSelectChannel.Whisper)));
+
+        _input.SetInputCommand(ContentKeyFunctions.FocusLOOC,
+            InputCmdHandler.FromDelegate(_ => FocusChannel(ChatSelectChannel.LOOC)));
 
         _input.SetInputCommand(ContentKeyFunctions.FocusOOC,
             InputCmdHandler.FromDelegate(_ => FocusChannel(ChatSelectChannel.OOC)));
@@ -183,6 +204,23 @@ public sealed class ChatUIController : UIController
 
         _input.SetInputCommand(ContentKeyFunctions.CycleChatChannelBackward,
             InputCmdHandler.FromDelegate(_ => CycleChatChannel(false)));
+
+        var gameplayStateLoad = UIManager.GetUIController<GameplayStateLoadController>();
+        gameplayStateLoad.OnScreenLoad += OnScreenLoad;
+        gameplayStateLoad.OnScreenUnload += OnScreenUnload;
+    }
+
+    public void OnScreenLoad()
+    {
+        SetMainChat(true);
+
+        var viewportContainer = UIManager.ActiveScreen!.FindControl<LayoutContainer>("ViewportContainer");
+        SetSpeechBubbleRoot(viewportContainer);
+    }
+
+    public void OnScreenUnload()
+    {
+        SetMainChat(false);
     }
 
     public void SetMainChat(bool setting)
@@ -351,7 +389,9 @@ public sealed class ChatUIController : UIController
 
     private void AddSpeechBubble(ChatMessage msg, SpeechBubble.SpeechType speechType)
     {
-        if (!_entities.EntityExists(msg.SenderEntity))
+        var ent = EntityManager.GetEntity(msg.SenderEntity);
+
+        if (!EntityManager.EntityExists(ent))
         {
             _sawmill.Debug("Got local chat message with invalid sender entity: {0}", msg.SenderEntity);
             return;
@@ -362,14 +402,14 @@ public sealed class ChatUIController : UIController
 
         foreach (var message in messages)
         {
-            EnqueueSpeechBubble(msg.SenderEntity, message, speechType);
+            EnqueueSpeechBubble(ent, message, speechType);
         }
     }
 
     private void CreateSpeechBubble(EntityUid entity, SpeechBubbleData speechData)
     {
         var bubble =
-            SpeechBubble.CreateSpeechBubble(speechData.Type, speechData.Message, entity, _eye, _manager, _entities);
+            SpeechBubble.CreateSpeechBubble(speechData.Type, speechData.Message, entity, _eye, _manager, EntityManager);
 
         bubble.OnDied += SpeechBubbleDied;
 
@@ -406,7 +446,7 @@ public sealed class ChatUIController : UIController
     private void EnqueueSpeechBubble(EntityUid entity, string contents, SpeechBubble.SpeechType speechType)
     {
         // Don't enqueue speech bubbles for other maps. TODO: Support multiple viewports/maps?
-        if (_entities.GetComponent<TransformComponent>(entity).MapID != _eye.CurrentMap)
+        if (EntityManager.GetComponent<TransformComponent>(entity).MapID != _eye.CurrentMap)
             return;
 
         if (!_queuedSpeechBubbles.TryGetValue(entity, out var queueData))
@@ -478,6 +518,7 @@ public sealed class ChatUIController : UIController
         if (_admin.HasFlag(AdminFlags.Admin))
         {
             FilterableChannels |= ChatChannel.Admin;
+            FilterableChannels |= ChatChannel.AdminAlert;
             FilterableChannels |= ChatChannel.AdminChat;
             CanSendChannels |= ChatSelectChannel.Admin;
         }
@@ -522,7 +563,7 @@ public sealed class ChatUIController : UIController
 
         foreach (var (entity, queueData) in _queuedSpeechBubbles.ShallowClone())
         {
-            if (!_entities.EntityExists(entity))
+            if (!EntityManager.EntityExists(entity))
             {
                 _queuedSpeechBubbles.Remove(entity);
                 continue;
@@ -553,14 +594,14 @@ public sealed class ChatUIController : UIController
         var predicate = static (EntityUid uid, (EntityUid compOwner, EntityUid? attachedEntity) data)
             => uid == data.compOwner || uid == data.attachedEntity;
         var playerPos = player != null
-            ? _entities.GetComponent<TransformComponent>(player.Value).MapPosition
+            ? EntityManager.GetComponent<TransformComponent>(player.Value).MapPosition
             : MapCoordinates.Nullspace;
 
         var occluded = player != null && _examine.IsOccluded(player.Value);
 
         foreach (var (ent, bubs) in _activeSpeechBubbles)
         {
-            if (_entities.Deleted(ent))
+            if (EntityManager.Deleted(ent))
             {
                 SetBubbles(bubs, false);
                 continue;
@@ -572,7 +613,7 @@ public sealed class ChatUIController : UIController
                 continue;
             }
 
-            var otherPos = _entities.GetComponent<TransformComponent>(ent).MapPosition;
+            var otherPos = EntityManager.GetComponent<TransformComponent>(ent).MapPosition;
 
             if (occluded && !ExamineSystemShared.InRangeUnOccluded(
                     playerPos,
@@ -733,7 +774,17 @@ public sealed class ChatUIController : UIController
         _manager.SendMessage(text, prefixChannel == 0 ? channel : prefixChannel);
     }
 
-    private void OnChatMessage(MsgChatMessage message) => ProcessChatMessage(message.Message);
+    private void OnChatMessage(MsgChatMessage message)
+    {
+        var msg = message.Message;
+        ProcessChatMessage(msg);
+
+        if ((msg.Channel & ChatChannel.AdminRelated) == 0 ||
+            _cfg.GetCVar(CCVars.ReplayRecordAdminChat))
+        {
+            _replayRecording.RecordClientMessage(msg);
+        }
+    }
 
     public void ProcessChatMessage(ChatMessage msg, bool speechBubble = true)
     {

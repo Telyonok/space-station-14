@@ -1,35 +1,36 @@
 using Content.Server.Actions;
 using Content.Server.Atmos.EntitySystems;
-using Content.Server.Nutrition.Components;
 using Content.Server.Popups;
-using Content.Shared.Actions;
 using Content.Shared.Atmos;
+using Content.Shared.Nutrition.Components;
+using Content.Shared.Nutrition.EntitySystems;
+using Content.Shared.RatKing;
 using Robust.Server.GameObjects;
-using Robust.Shared.Player;
 
 namespace Content.Server.RatKing
 {
     public sealed class RatKingSystem : EntitySystem
     {
-        [Dependency] private readonly PopupSystem _popup = default!;
         [Dependency] private readonly ActionsSystem _action = default!;
         [Dependency] private readonly AtmosphereSystem _atmos = default!;
+        [Dependency] private readonly HungerSystem _hunger = default!;
+        [Dependency] private readonly PopupSystem _popup = default!;
         [Dependency] private readonly TransformSystem _xform = default!;
 
         public override void Initialize()
         {
             base.Initialize();
 
-            SubscribeLocalEvent<RatKingComponent, ComponentStartup>(OnStartup);
+            SubscribeLocalEvent<RatKingComponent, MapInitEvent>(OnMapInit);
 
             SubscribeLocalEvent<RatKingComponent, RatKingRaiseArmyActionEvent>(OnRaiseArmy);
             SubscribeLocalEvent<RatKingComponent, RatKingDomainActionEvent>(OnDomain);
         }
 
-        private void OnStartup(EntityUid uid, RatKingComponent component, ComponentStartup args)
+        private void OnMapInit(EntityUid uid, RatKingComponent component, MapInitEvent args)
         {
-            _action.AddAction(uid, component.ActionRaiseArmy, null);
-            _action.AddAction(uid, component.ActionDomain, null);
+            _action.AddAction(uid, ref component.ActionRaiseArmyEntity, component.ActionRaiseArmy);
+            _action.AddAction(uid, ref component.ActionDomainEntity, component.ActionDomain);
         }
 
         /// <summary>
@@ -50,7 +51,7 @@ namespace Content.Server.RatKing
                 return;
             }
             args.Handled = true;
-            hunger.CurrentHunger -= component.HungerPerArmyUse;
+            _hunger.ModifyHunger(uid, -component.HungerPerArmyUse, hunger);
             Spawn(component.ArmyMobSpawnId, Transform(uid).Coordinates); //spawn the little mouse boi
         }
 
@@ -73,7 +74,7 @@ namespace Content.Server.RatKing
                 return;
             }
             args.Handled = true;
-            hunger.CurrentHunger -= component.HungerPerDomainUse;
+            _hunger.ModifyHunger(uid, -component.HungerPerDomainUse, hunger);
 
             _popup.PopupEntity(Loc.GetString("rat-king-domain-popup"), uid);
 
@@ -83,7 +84,4 @@ namespace Content.Server.RatKing
             tileMix?.AdjustMoles(Gas.Miasma, component.MolesMiasmaPerDomain);
         }
     }
-
-    public sealed class RatKingRaiseArmyActionEvent : InstantActionEvent { };
-    public sealed class RatKingDomainActionEvent : InstantActionEvent { };
-};
+}

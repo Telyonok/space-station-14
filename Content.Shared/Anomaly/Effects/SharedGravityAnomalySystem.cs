@@ -1,8 +1,11 @@
 ﻿using System.Linq;
 using Content.Shared.Anomaly.Components;
 using Content.Shared.Anomaly.Effects.Components;
+using Content.Shared.Ghost;
 using Content.Shared.Throwing;
 using Robust.Shared.Map;
+using Content.Shared.Physics;
+using Robust.Shared.Physics.Components;
 
 namespace Content.Shared.Anomaly.Effects;
 
@@ -26,10 +29,17 @@ public abstract class SharedGravityAnomalySystem : EntitySystem
         var range = component.MaxThrowRange * args.Severity;
         var strength = component.MaxThrowStrength * args.Severity;
         var lookup = _lookup.GetEntitiesInRange(uid, range, LookupFlags.Dynamic | LookupFlags.Sundries);
+        var xformQuery = GetEntityQuery<TransformComponent>();
+        var worldPos = _xform.GetWorldPosition(xform, xformQuery);
+        var physQuery = GetEntityQuery<PhysicsComponent>();
+
         foreach (var ent in lookup)
         {
-            var tempXform = Transform(ent);
-            var foo = tempXform.MapPosition.Position - xform.MapPosition.Position;
+            if (physQuery.TryGetComponent(ent, out var phys)
+                && (phys.CollisionMask & (int) CollisionGroup.GhostImpassable) != 0)
+                continue;
+
+            var foo = _xform.GetWorldPosition(ent, xformQuery) - worldPos;
             _throwing.TryThrow(ent, foo * 10, strength, uid, 0);
         }
     }
@@ -48,11 +58,16 @@ public abstract class SharedGravityAnomalySystem : EntitySystem
         var range = component.MaxThrowRange * 2;
         var strength = component.MaxThrowStrength * 2;
         var lookup = _lookup.GetEntitiesInRange(uid, range, LookupFlags.Dynamic | LookupFlags.Sundries);
+        var xformQuery = GetEntityQuery<TransformComponent>();
+        var physQuery = GetEntityQuery<PhysicsComponent>();
+
         foreach (var ent in lookup)
         {
-            var tempXform = Transform(ent);
+            if (physQuery.TryGetComponent(ent, out var phys)
+                && (phys.CollisionMask & (int) CollisionGroup.GhostImpassable) != 0)
+                continue;
 
-            var foo = tempXform.MapPosition.Position - xform.MapPosition.Position;
+            var foo = _xform.GetWorldPosition(ent, xformQuery) - worldPos;
             _throwing.TryThrow(ent, foo * 5, strength, uid, 0);
         }
     }

@@ -7,12 +7,16 @@ namespace Content.Shared.Humanoid.Markings
 {
     [DataDefinition]
     [Serializable, NetSerializable]
-    public sealed class Marking : IEquatable<Marking>, IComparable<Marking>, IComparable<string>
+    public sealed partial class Marking : IEquatable<Marking>, IComparable<Marking>, IComparable<string>
     {
         [DataField("markingColor")]
         private List<Color> _markingColors = new();
 
-        private Marking(string markingId,
+        private Marking()
+        {
+        }
+
+        public Marking(string markingId,
             List<Color> markingColors)
         {
             MarkingId = markingId;
@@ -45,8 +49,8 @@ namespace Content.Shared.Humanoid.Markings
         /// <summary>
         ///     ID of the marking prototype.
         /// </summary>
-        [DataField("markingId")]
-        public string MarkingId { get; } = default!;
+        [DataField("markingId", required: true)]
+        public string MarkingId { get; private set; } = default!;
 
         /// <summary>
         ///     All colors currently on this marking.

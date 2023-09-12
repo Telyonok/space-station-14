@@ -1,4 +1,5 @@
 using Content.Shared.Containers.ItemSlots;
+using Content.Shared.Paper;
 using Robust.Shared.Audio;
 using Robust.Shared.Prototypes;
 using Robust.Shared.Serialization.TypeSerializers.Implementations.Custom.Prototype;
@@ -6,7 +7,7 @@ using Robust.Shared.Serialization.TypeSerializers.Implementations.Custom.Prototy
 namespace Content.Server.Fax;
 
 [RegisterComponent]
-public sealed class FaxMachineComponent : Component
+public sealed partial class FaxMachineComponent : Component
 {
     /// <summary>
     /// Name with which the fax will be visible to others on the network
@@ -79,7 +80,7 @@ public sealed class FaxMachineComponent : Component
     /// </summary>
     [ViewVariables]
     [DataField("printingQueue")]
-    public Queue<FaxPrintout> PrintingQueue { get; } = new();
+    public Queue<FaxPrintout> PrintingQueue { get; private set; } = new();
 
     /// <summary>
     /// Message sending timeout
@@ -121,29 +122,33 @@ public sealed class FaxMachineComponent : Component
 }
 
 [DataDefinition]
-public sealed class FaxPrintout
+public sealed partial class FaxPrintout
 {
-    [DataField("name")]
-    public string Name { get; }
+    [DataField("name", required: true)]
+    public string Name { get; private set; } = default!;
 
-    [DataField("content")]
-    public string Content { get; }
+    [DataField("content", required: true)]
+    public string Content { get; private set; } = default!;
 
-    [DataField("prototypeId", customTypeSerializer: typeof(PrototypeIdSerializer<EntityPrototype>))]
-    public string PrototypeId { get; }
+    [DataField("prototypeId", customTypeSerializer: typeof(PrototypeIdSerializer<EntityPrototype>), required: true)]
+    public string PrototypeId { get; private set; } = default!;
 
     [DataField("stampState")]
-    public string? StampState { get; }
+    public string? StampState { get; private set; }
 
     [DataField("stampedBy")]
-    public List<string> StampedBy { get; }
+    public List<StampDisplayInfo> StampedBy { get; private set; } = new();
 
-    public FaxPrintout(string content, string name, string? prototypeId, string? stampState = null, List<string>? stampedBy = null)
+    private FaxPrintout()
+    {
+    }
+
+    public FaxPrintout(string content, string name, string? prototypeId = null, string? stampState = null, List<StampDisplayInfo>? stampedBy = null)
     {
         Content = content;
         Name = name;
         PrototypeId = prototypeId ?? "";
         StampState = stampState;
-        StampedBy = stampedBy ?? new List<string>();
+        StampedBy = stampedBy ?? new List<StampDisplayInfo>();
     }
 }

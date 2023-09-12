@@ -1,9 +1,11 @@
-using System.Diagnostics.CodeAnalysis;
 using System.Linq;
+using System.Numerics;
 using System.Threading.Tasks;
+using Content.Server.Administration.Logs;
 using Content.Server.Administration.Managers;
 using Content.Shared.Administration;
 using Content.Shared.Chunking;
+using Content.Shared.Database;
 using Content.Shared.Decals;
 using Content.Shared.Maps;
 using Microsoft.Extensions.ObjectPool;
@@ -11,7 +13,6 @@ using Robust.Server.Player;
 using Robust.Shared;
 using Robust.Shared.Configuration;
 using Robust.Shared.Enums;
-using Robust.Shared.GameStates;
 using Robust.Shared.Map;
 using Robust.Shared.Threading;
 using Robust.Shared.Timing;
@@ -29,19 +30,21 @@ namespace Content.Server.Decals
         [Dependency] private readonly ChunkingSystem _chunking = default!;
         [Dependency] private readonly IConfigurationManager _conf = default!;
         [Dependency] private readonly IGameTiming _timing = default!;
+        [Dependency] private readonly IAdminLogManager _adminLogger = default!;
 
-        private readonly Dictionary<EntityUid, HashSet<Vector2i>> _dirtyChunks = new();
-        private readonly Dictionary<IPlayerSession, Dictionary<EntityUid, HashSet<Vector2i>>> _previousSentChunks = new();
+        private readonly Dictionary<NetEntity, HashSet<Vector2i>> _dirtyChunks = new();
+        private readonly Dictionary<IPlayerSession, Dictionary<NetEntity, HashSet<Vector2i>>> _previousSentChunks = new();
+        private static readonly Vector2 _boundsMinExpansion = new(0.01f, 0.01f);
+        private static readonly Vector2 _boundsMaxExpansion = new(1.01f, 1.01f);
 
         // If this ever gets parallelised then you'll want to increase the pooled count.
         private ObjectPool<HashSet<Vector2i>> _chunkIndexPool =
             new DefaultObjectPool<HashSet<Vector2i>>(
                 new DefaultPooledObjectPolicy<HashSet<Vector2i>>(), 64);
 
-        private ObjectPool<Dictionary<EntityUid, HashSet<Vector2i>>> _chunkViewerPool =
-            new DefaultObjectPool<Dictionary<EntityUid, HashSet<Vector2i>>>(
-                new DefaultPooledObjectPolicy<Dictionary<EntityUid, HashSet<Vector2i>>>(), 64);
-        private bool _pvsEnabled;
+        private ObjectPool<Dictionary<NetEntity, HashSet<Vector2i>>> _chunkViewerPool =
+            new DefaultObjectPool<Dictionary<NetEntity, HashSet<Vector2i>>>(
+                new DefaultPooledObjectPolicy<Dictionary<NetEntity, HashSet<Vector2i>>>(), 64);
 
         public override void Initialize()
         {
@@ -49,7 +52,6 @@ namespace Content.Server.Decals
 
             _playerManager.PlayerStatusChanged += OnPlayerStatusChanged;
             SubscribeLocalEvent<TileChangedEvent>(OnTileChanged);
-            SubscribeLocalEvent<DecalGridComponent, ComponentGetState>(OnGetState);
 
             SubscribeNetworkEvent<RequestDecalPlacementEvent>(OnDecalPlacementRequest);
             SubscribeNetworkEvent<RequestDecalRemovalEvent>(OnDecalRemovalRequest);
@@ -60,10 +62,10 @@ namespace Content.Server.Decals
 
         private void OnPvsToggle(bool value)
         {
-            if (value == _pvsEnabled)
+            if (value == PvsEnabled)
                 return;
 
-            _pvsEnabled = value;
+            PvsEnabled = value;
 
             if (value)
                 return;
@@ -78,28 +80,6 @@ namespace Content.Server.Decals
                 grid.ForceTick = _timing.CurTick;
                 Dirty(grid, meta);
             }
-        }
-
-        private void OnGetState(EntityUid uid, DecalGridComponent component, ref ComponentGetState args)
-        {
-            if (_pvsEnabled && !args.ReplayState)
-                return;
-
-            // Should this be a full component state or a delta-state?
-            if (args.FromTick <= component.CreationTick || args.FromTick <= component.ForceTick)
-            {
-                args.State = new DecalGridState(component.ChunkCollection.ChunkCollection);
-                return;
-            }
-
-            var data = new Dictionary<Vector2i, DecalChunk>();
-            foreach (var (index, chunk) in component.ChunkCollection.ChunkCollection)
-            {
-                if (chunk.LastModified >= args.FromTick)
-                    data[index] = chunk;
-            }
-
-            args.State = new DecalGridState(data) { AllChunks = new(component.ChunkCollection.ChunkCollection.Keys) };
         }
 
         private void OnGridSplit(ref PostGridSplitEvent ev)
@@ -124,7 +104,7 @@ namespace Content.Server.Decals
                 if (!oldChunkCollection.TryGetValue(chunkIndices, out var oldChunk))
                     continue;
 
-                var bounds = new Box2(tilePos - 0.01f, tilePos + 1.01f);
+                var bounds = new Box2(tilePos - _boundsMinExpansion, tilePos + _boundsMaxExpansion);
                 var toRemove = new RemQueue<uint>();
 
                 foreach (var (oldDecalId, decal) in oldChunk.Decals)
@@ -221,10 +201,24 @@ namespace Content.Server.Decals
             if (!_adminManager.HasAdminFlag(session, AdminFlags.Spawn))
                 return;
 
-            if (!ev.Coordinates.IsValid(EntityManager))
+            var coordinates = GetCoordinates(ev.Coordinates);
+
+            if (!coordinates.IsValid(EntityManager))
                 return;
 
-            TryAddDecal(ev.Decal, ev.Coordinates, out _);
+            if (!TryAddDecal(ev.Decal, coordinates, out _))
+                return;
+
+            if (eventArgs.SenderSession.AttachedEntity != null)
+            {
+                _adminLogger.Add(LogType.CrayonDraw, LogImpact.High,
+                    $"{ToPrettyString(eventArgs.SenderSession.AttachedEntity.Value):actor} drew a {ev.Decal.Color} {ev.Decal.Id} at {ev.Coordinates}");
+            }
+            else
+            {
+                _adminLogger.Add(LogType.CrayonDraw, LogImpact.High,
+                    $"{eventArgs.SenderSession.Name} drew a {ev.Decal.Color} {ev.Decal.Id} at {ev.Coordinates}");
+            }
         }
 
         private void OnDecalRemovalRequest(RequestDecalRemovalEvent ev, EntitySessionEventArgs eventArgs)
@@ -236,23 +230,37 @@ namespace Content.Server.Decals
             if (!_adminManager.HasAdminFlag(session, AdminFlags.Spawn))
                 return;
 
-            if (!ev.Coordinates.IsValid(EntityManager))
+            var coordinates = GetCoordinates(ev.Coordinates);
+
+            if (!coordinates.IsValid(EntityManager))
                 return;
 
-            var gridId = ev.Coordinates.GetGridUid(EntityManager);
+            var gridId = coordinates.GetGridUid(EntityManager);
 
             if (gridId == null)
                 return;
 
             // remove all decals on the same tile
-            foreach (var (decalId, _) in GetDecalsInRange(gridId.Value, ev.Coordinates.Position))
+            foreach (var (decalId, decal) in GetDecalsInRange(gridId.Value, ev.Coordinates.Position))
             {
+                if (eventArgs.SenderSession.AttachedEntity != null)
+                {
+                    _adminLogger.Add(LogType.CrayonDraw, LogImpact.High,
+                        $"{ToPrettyString(eventArgs.SenderSession.AttachedEntity.Value):actor} removed a {decal.Color} {decal.Id} at {ev.Coordinates}");
+                }
+                else
+                {
+                    _adminLogger.Add(LogType.CrayonDraw, LogImpact.High,
+                        $"{eventArgs.SenderSession.Name} removed a {decal.Color} {decal.Id} at {ev.Coordinates}");
+                }
+
                 RemoveDecal(gridId.Value, decalId);
             }
         }
 
-        protected override void DirtyChunk(EntityUid id, Vector2i chunkIndices, DecalChunk chunk)
+        protected override void DirtyChunk(EntityUid uid, Vector2i chunkIndices, DecalChunk chunk)
         {
+            var id = GetNetEntity(uid);
             chunk.LastModified = _timing.CurTick;
             if(!_dirtyChunks.ContainsKey(id))
                 _dirtyChunks[id] = new HashSet<Vector2i>();
@@ -307,7 +315,7 @@ namespace Content.Server.Decals
 
             foreach (var (uid, decal) in chunk.Decals)
             {
-                if ((position - decal.Coordinates-new Vector2(0.5f, 0.5f)).Length > distance)
+                if ((position - decal.Coordinates - new Vector2(0.5f, 0.5f)).Length() > distance)
                     continue;
 
                 if (validDelegate == null || validDelegate(decal))
@@ -404,17 +412,17 @@ namespace Content.Server.Decals
 
             foreach (var ent in _dirtyChunks.Keys)
             {
-                if (TryComp(ent, out DecalGridComponent? decals))
-                    Dirty(decals);
+                if (TryGetEntity(ent, out var uid) && TryComp(uid, out DecalGridComponent? decals))
+                    Dirty(uid.Value, decals);
             }
 
-            if (!_pvsEnabled)
+            if (!PvsEnabled)
             {
                 _dirtyChunks.Clear();
                 return;
             }
 
-            if (_pvsEnabled)
+            if (PvsEnabled)
             {
                 var players = _playerManager.ServerSessions.Where(x => x.Status == SessionStatus.InGame).ToArray();
                 var opts = new ParallelOptions { MaxDegreeOfParallelism = _parMan.ParallelProcessCount };
@@ -426,8 +434,7 @@ namespace Content.Server.Decals
 
         public void UpdatePlayer(IPlayerSession player)
         {
-            var xformQuery = GetEntityQuery<TransformComponent>();
-            var chunksInRange = _chunking.GetChunksForSession(player, ChunkSize, xformQuery, _chunkIndexPool, _chunkViewerPool);
+            var chunksInRange = _chunking.GetChunksForSession(player, ChunkSize, _chunkIndexPool, _chunkViewerPool);
             var staleChunks = _chunkViewerPool.Get();
             var previouslySent = _previousSentChunks[player];
 
@@ -435,16 +442,16 @@ namespace Content.Server.Decals
             // Then, remove them from previousSentChunks (for stuff like grids out of range)
             // and also mark them as stale for networking.
 
-            foreach (var (gridId, oldIndices) in previouslySent)
+            foreach (var (netGrid, oldIndices) in previouslySent)
             {
                 // Mark the whole grid as stale and flag for removal.
-                if (!chunksInRange.TryGetValue(gridId, out var chunks))
+                if (!chunksInRange.TryGetValue(netGrid, out var chunks))
                 {
-                    previouslySent.Remove(gridId);
+                    previouslySent.Remove(netGrid);
 
                     // Was the grid deleted?
-                    if (MapManager.IsGrid(gridId))
-                        staleChunks[gridId] = oldIndices;
+                    if (!TryGetEntity(netGrid, out var gridId) || !MapManager.IsGrid(gridId.Value))
+                        staleChunks[netGrid] = oldIndices;
                     else
                     {
                         // If grid was deleted then don't worry about telling the client to delete the chunk.
@@ -460,7 +467,9 @@ namespace Content.Server.Decals
                 // Get individual stale chunks.
                 foreach (var chunk in oldIndices)
                 {
-                    if (chunks.Contains(chunk)) continue;
+                    if (chunks.Contains(chunk))
+                        continue;
+
                     elmo.Add(chunk);
                 }
 
@@ -470,16 +479,16 @@ namespace Content.Server.Decals
                     continue;
                 }
 
-                staleChunks.Add(gridId, elmo);
+                staleChunks.Add(netGrid, elmo);
             }
 
             var updatedChunks = _chunkViewerPool.Get();
-            foreach (var (gridId, gridChunks) in chunksInRange)
+            foreach (var (netGrid, gridChunks) in chunksInRange)
             {
                 var newChunks = _chunkIndexPool.Get();
-                _dirtyChunks.TryGetValue(gridId, out var dirtyChunks);
+                _dirtyChunks.TryGetValue(netGrid, out var dirtyChunks);
 
-                if (!previouslySent.TryGetValue(gridId, out var previousChunks))
+                if (!previouslySent.TryGetValue(netGrid, out var previousChunks))
                     newChunks.UnionWith(gridChunks);
                 else
                 {
@@ -493,19 +502,19 @@ namespace Content.Server.Decals
                     _chunkIndexPool.Return(previousChunks);
                 }
 
-                previouslySent[gridId] = gridChunks;
+                previouslySent[netGrid] = gridChunks;
 
                 if (newChunks.Count == 0)
                     _chunkIndexPool.Return(newChunks);
                 else
-                    updatedChunks[gridId] = newChunks;
+                    updatedChunks[netGrid] = newChunks;
             }
 
             //send all gridChunks to client
             SendChunkUpdates(player, updatedChunks, staleChunks);
         }
 
-        private void ReturnToPool(Dictionary<EntityUid, HashSet<Vector2i>> chunks)
+        private void ReturnToPool(Dictionary<NetEntity, HashSet<Vector2i>> chunks)
         {
             foreach (var (_, previous) in chunks)
             {
@@ -519,12 +528,14 @@ namespace Content.Server.Decals
 
         private void SendChunkUpdates(
             IPlayerSession session,
-            Dictionary<EntityUid, HashSet<Vector2i>> updatedChunks,
-            Dictionary<EntityUid, HashSet<Vector2i>> staleChunks)
+            Dictionary<NetEntity, HashSet<Vector2i>> updatedChunks,
+            Dictionary<NetEntity, HashSet<Vector2i>> staleChunks)
         {
-            var updatedDecals = new Dictionary<EntityUid, Dictionary<Vector2i, DecalChunk>>();
-            foreach (var (gridId, chunks) in updatedChunks)
+            var updatedDecals = new Dictionary<NetEntity, Dictionary<Vector2i, DecalChunk>>();
+            foreach (var (netGrid, chunks) in updatedChunks)
             {
+                var gridId = GetEntity(netGrid);
+
                 var collection = ChunkCollection(gridId);
                 if (collection == null)
                     continue;
@@ -537,7 +548,7 @@ namespace Content.Server.Decals
                             ? chunk
                             : new());
                 }
-                updatedDecals[gridId] = gridChunks;
+                updatedDecals[netGrid] = gridChunks;
             }
 
             if (updatedDecals.Count != 0 || staleChunks.Count != 0)

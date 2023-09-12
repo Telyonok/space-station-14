@@ -3,7 +3,6 @@ using System.Text; // todo: remove this stinky LINQy
 using Robust.Server.GameObjects;
 using Robust.Shared.Audio;
 using Robust.Shared.Timing;
-using Content.Server.DoAfter;
 using Content.Server.Paper;
 using Content.Server.Popups;
 using Content.Server.UserInterface;
@@ -18,12 +17,13 @@ namespace Content.Server.Forensics
     public sealed class ForensicScannerSystem : EntitySystem
     {
         [Dependency] private readonly IGameTiming _gameTiming = default!;
-        [Dependency] private readonly DoAfterSystem _doAfterSystem = default!;
+        [Dependency] private readonly SharedDoAfterSystem _doAfterSystem = default!;
         [Dependency] private readonly UserInterfaceSystem _uiSystem = default!;
         [Dependency] private readonly PopupSystem _popupSystem = default!;
         [Dependency] private readonly PaperSystem _paperSystem = default!;
         [Dependency] private readonly SharedHandsSystem _handsSystem = default!;
         [Dependency] private readonly SharedAudioSystem _audioSystem = default!;
+        [Dependency] private readonly MetaDataSystem _metaData = default!;
 
         private ISawmill _sawmill = default!;
 
@@ -39,7 +39,7 @@ namespace Content.Server.Forensics
             SubscribeLocalEvent<ForensicScannerComponent, GetVerbsEvent<UtilityVerb>>(OnUtilityVerb);
             SubscribeLocalEvent<ForensicScannerComponent, ForensicScannerPrintMessage>(OnPrint);
             SubscribeLocalEvent<ForensicScannerComponent, ForensicScannerClearMessage>(OnClear);
-            SubscribeLocalEvent<ForensicScannerComponent, DoAfterEvent>(OnDoAfter);
+            SubscribeLocalEvent<ForensicScannerComponent, ForensicScannerDoAfterEvent>(OnDoAfter);
         }
 
         private void UpdateUserInterface(EntityUid uid, ForensicScannerComponent component)
@@ -47,6 +47,7 @@ namespace Content.Server.Forensics
             var state = new ForensicScannerBoundUserInterfaceState(
                 component.Fingerprints,
                 component.Fibers,
+                component.DNAs,
                 component.LastScannedName,
                 component.PrintCooldown,
                 component.PrintReadyAt);
@@ -69,12 +70,14 @@ namespace Content.Server.Forensics
                 {
                     scanner.Fingerprints = new();
                     scanner.Fibers = new();
+                    scanner.DNAs = new();
                 }
 
                 else
                 {
                     scanner.Fingerprints = forensics.Fingerprints.ToList();
                     scanner.Fibers = forensics.Fibers.ToList();
+                    scanner.DNAs = forensics.DNAs.ToList();
                 }
 
                 scanner.LastScannedName = MetaData(args.Args.Target.Value).EntityName;
@@ -88,11 +91,10 @@ namespace Content.Server.Forensics
         /// </remarks>
         private void StartScan(EntityUid uid, ForensicScannerComponent component, EntityUid user, EntityUid target)
         {
-            _doAfterSystem.DoAfter(new DoAfterEventArgs(user, component.ScanDelay, target: target, used: uid)
+            _doAfterSystem.TryStartDoAfter(new DoAfterArgs(EntityManager, user, component.ScanDelay, new ForensicScannerDoAfterEvent(), uid, target: target, used: uid)
             {
                 BreakOnTargetMove = true,
                 BreakOnUserMove = true,
-                BreakOnStun = true,
                 NeedHand = true
             });
         }
@@ -105,7 +107,7 @@ namespace Content.Server.Forensics
             var verb = new UtilityVerb()
             {
                 Act = () => StartScan(uid, component, args.User, args.Target),
-                IconEntity = uid,
+                IconEntity = GetNetEntity(uid),
                 Text = Loc.GetString("forensic-scanner-verb-text"),
                 Message = Loc.GetString("forensic-scanner-verb-message")
             };
@@ -187,7 +189,7 @@ namespace Content.Server.Forensics
             }
 
             // Spawn a piece of paper.
-            var printed = EntityManager.SpawnEntity("Paper", Transform(uid).Coordinates);
+            var printed = EntityManager.SpawnEntity(component.MachineOutput, Transform(uid).Coordinates);
             _handsSystem.PickupOrDrop(args.Session.AttachedEntity, printed, checkActionBlocker: false);
 
             if (!TryComp<PaperComponent>(printed, out var paper))
@@ -196,7 +198,7 @@ namespace Content.Server.Forensics
                 return;
             }
 
-            MetaData(printed).EntityName = Loc.GetString("forensic-scanner-report-title", ("entity", component.LastScannedName));
+            _metaData.SetEntityName(printed, Loc.GetString("forensic-scanner-report-title", ("entity", component.LastScannedName)));
 
             var text = new StringBuilder();
 
@@ -210,6 +212,12 @@ namespace Content.Server.Forensics
             foreach (var fiber in component.Fibers)
             {
                 text.AppendLine(fiber);
+            }
+            text.AppendLine();
+            text.AppendLine(Loc.GetString("forensic-scanner-interface-dnas"));
+            foreach (var dna in component.DNAs)
+            {
+                text.AppendLine(dna);
             }
 
             _paperSystem.SetContent(printed, text.ToString());
@@ -230,6 +238,7 @@ namespace Content.Server.Forensics
 
             component.Fingerprints = new();
             component.Fibers = new();
+            component.DNAs = new();
             component.LastScannedName = string.Empty;
 
             UpdateUserInterface(uid, component);
